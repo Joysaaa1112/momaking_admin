@@ -19,9 +19,9 @@
 			</a-space>
 		</a-card>
 
-		<!-- 概览指标 -->
+		<!-- 流量指标 -->
 		<a-row :gutter="16" class="mb16">
-			<a-col v-for="card in cards" :key="card.key" :span="4">
+			<a-col v-for="card in trafficCards" :key="card.key" :span="4">
 				<a-card class="mk-card" :loading="state.loading">
 					<div class="metric">
 						<div class="metric-label">{{ card.label }}</div>
@@ -29,6 +29,30 @@
 						<div class="metric-growth">
 							<span v-if="card.growth === null || card.growth === undefined" class="flat">较上期 —</span>
 							<span v-else :class="growthClass(card.growth, card.invert)">
+								较上期 {{ card.growth > 0 ? '+' : '' }}{{ card.growth }}%
+							</span>
+						</div>
+					</div>
+				</a-card>
+			</a-col>
+		</a-row>
+
+		<!-- 业务转化指标 -->
+		<a-row :gutter="16" class="mb16">
+			<a-col v-for="card in conversionCards" :key="card.key" :span="4">
+				<a-card class="mk-card" :loading="state.loading">
+					<div class="metric">
+						<div class="metric-label">
+							{{ card.label }}
+							<a-tooltip v-if="card.tip" :title="card.tip">
+								<QuestionCircleOutlined class="tip-icon" />
+							</a-tooltip>
+						</div>
+						<div class="metric-value" :class="{ 'metric-value-sm': card.small }">{{ card.value }}</div>
+						<div class="metric-growth">
+							<span v-if="card.noGrowth" class="flat">{{ card.sub || '　' }}</span>
+							<span v-else-if="card.growth === null || card.growth === undefined" class="flat">较上期 —</span>
+							<span v-else :class="growthClass(card.growth)">
 								较上期 {{ card.growth > 0 ? '+' : '' }}{{ card.growth }}%
 							</span>
 						</div>
@@ -47,7 +71,19 @@
 		<a-row :gutter="16" class="mb16">
 			<!-- 报价漏斗 -->
 			<a-col :span="9">
-				<a-card title="报价转化漏斗" :loading="state.loading" style="height: 100%">
+				<a-card :loading="state.loading" style="height: 100%">
+					<template #title>
+						报价转化漏斗
+						<a-tooltip placement="right" overlay-class-name="funnel-tip">
+							<template #title>
+								<div>只统计<b>按顺序</b>走完前面每一步的访客：每一步都做过，且首次发生时间不早于上一步。</div>
+								<div style="margin-top: 6px">
+									所以会比「维度排行 → 事件」里的次数少，比如从订单列表直接去付老订单的客户，不算在这里的「支付成功」。
+								</div>
+							</template>
+							<QuestionCircleOutlined class="tip-icon" />
+						</a-tooltip>
+					</template>
 					<div v-for="(step, index) in state.funnel" :key="step.event_type" class="funnel-step">
 						<div class="funnel-head">
 							<span class="funnel-name">{{ index + 1 }}. {{ step.name }}</span>
@@ -83,7 +119,10 @@
 						<template #bodyCell="{ column, record }">
 							<template v-if="column.dataIndex === 'name'">
 								<a-tooltip :title="record.name">
-									<span class="ellipsis">{{ record.name || '(空)' }}</span>
+									<span class="ellipsis">
+										{{ labelOf(state.rankingDimension, record.name) }}
+										<span v-if="labelOf(state.rankingDimension, record.name) !== record.name" class="code">{{ record.name }}</span>
+									</span>
 								</a-tooltip>
 							</template>
 							<template v-else-if="column.dataIndex === 'ratio'">
@@ -99,12 +138,15 @@
 		<a-card title="事件明细">
 			<template #extra>
 				<a-space>
-					<a-input
+					<a-select
 						v-model:value="state.eventFilter.event_type"
-						placeholder="事件类型，如 quote_price_view"
+						:options="eventOptions"
+						placeholder="全部事件"
 						allow-clear
-						style="width: 220px"
-						@press-enter="reloadEvents"
+						show-search
+						option-filter-prop="label"
+						style="width: 240px"
+						@change="reloadEvents"
 					/>
 					<a-input
 						v-model:value="state.eventFilter.visitor_id"
@@ -128,13 +170,18 @@
 			>
 				<template #bodyCell="{ column, record }">
 					<template v-if="column.dataIndex === 'event_name'">
-						<a-tag :color="categoryColor(record.event_category)">{{ record.event_name }}</a-tag>
+						<a-tooltip :title="record.event_name">
+							<a-tag :color="categoryColor(record.event_category)">{{ labelOf('event', record.event_name) }}</a-tag>
+						</a-tooltip>
 					</template>
 					<template v-else-if="column.dataIndex === 'visitor_id'">
 						<a class="mono" @click="filterByVisitor(record.visitor_id)">{{ record.visitor_id.slice(0, 10) }}…</a>
 					</template>
 					<template v-else-if="column.dataIndex === 'device'">
-						{{ [record.device_type, record.browser, record.os].filter(Boolean).join(' / ') }}
+						{{ [labelOf('device', record.device_type), record.browser, record.os].filter(Boolean).join(' / ') }}
+					</template>
+					<template v-else-if="column.dataIndex === 'referrer_type'">
+						{{ labelOf('source', record.referrer_type) }}
 					</template>
 					<template v-else-if="column.dataIndex === 'props'">
 						<a-tooltip v-if="record.props" :title="JSON.stringify(record.props)">
@@ -151,11 +198,59 @@
 <script setup>
 	import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 	import { Empty, message } from 'ant-design-vue'
+	import { QuestionCircleOutlined } from '@ant-design/icons-vue'
 	import * as echarts from 'echarts'
 	import dayjs from 'dayjs'
 	import { statEventsApi, statFunnelApi, statOverviewApi, statRankingApi, statTrendApi } from '@/api/stat'
 
 	const simpleImage = Empty.PRESENTED_IMAGE_SIMPLE
+
+	/**
+	 * 事件中文名。和 Python 端 stat_service.EVENT_CATEGORY 的事件清单对应，
+	 * 新增埋点事件时两边一起加；没登记的事件原样显示英文名，不会报错。
+	 */
+	const EVENT_LABELS = {
+		pageview: '页面浏览',
+		page_leave: '离开页面',
+		scroll_depth: '滚动深度',
+		element_click: '元素点击',
+		outbound_click: '外链点击',
+		site_search: '站内搜索',
+		lang_switch: '切换语言',
+		sign_up: '注册',
+		sign_in: '登录',
+		sign_out: '退出登录',
+		auth_fail: '登录失败',
+		quote_create: '开始上传（创建报价单）',
+		file_upload_success: '上传完成',
+		file_upload_fail: '上传失败',
+		quote_price_view: '获得报价',
+		quote_config_change: '修改报价配置',
+		order_create: '提交订单',
+		pay_success: '支付成功',
+		chat_start: 'AI 对话',
+		image_generate: 'AI 出图',
+		contact_submit: '提交留言',
+		js_error: '前端报错',
+		api_error: '接口报错',
+		slow_load: '加载缓慢',
+	}
+
+	const LABELS = {
+		event: EVENT_LABELS,
+		source: { direct: '直接访问', search: '搜索引擎', social: '社交媒体', ads: '广告投放', internal: '站内跳转', other: '其它网站' },
+		device: { pc: '电脑', mobile: '手机', tablet: '平板', bot: '爬虫' },
+	}
+
+	/** 取中文名，没有登记的原样返回 */
+	function labelOf(dimension, value) {
+		const map = LABELS[dimension]
+		return (map && map[value]) || value || '(空)'
+	}
+
+	const eventOptions = Object.entries(EVENT_LABELS).map(([value, label]) => ({ value, label: `${label}  ${value}` }))
+
+	const CURRENCY_SYMBOL = { CNY: '¥', USD: '$', EUR: '€', GBP: '£', HKD: 'HK$', JPY: 'JP¥' }
 
 	const dimensions = [
 		{ key: 'page', label: '页面' },
@@ -178,14 +273,28 @@
 		range: [dayjs().subtract(6, 'day'), dayjs()],
 		siteId: '',
 		dimension: 'page',
-		overview: { current: {}, growth: {} },
+		// 当前表格里数据实际对应的维度。表头和中文名要跟着数据走，不能跟着标签走，
+		// 否则切标签后新数据还没回来的那一下，旧数据会套着新维度的名字显示
+		rankingDimension: 'page',
+		overview: { current: {}, growth: {}, amounts: { order: {}, pay: {} } },
 		trend: { granularity: 'day', list: [] },
 		funnel: [],
 		ranking: [],
 		events: [],
 		eventTotal: 0,
-		eventFilter: { event_type: '', visitor_id: '', page: 1, size: 20 },
+		eventFilter: { event_type: undefined, visitor_id: '', page: 1, size: 20 },
 	})
+
+	/**
+	 * 请求时序保护。同一块数据连续发了几次请求时（快速切标签、改日期时几块一起刷新），
+	 * 只认最后一次发出的；先发出去但后回来的旧响应直接丢掉，不然会把新数据覆盖掉。
+	 */
+	const requestSeq = {}
+	function nextSeq(key) {
+		requestSeq[key] = (requestSeq[key] || 0) + 1
+		return requestSeq[key]
+	}
+	const isLatest = (key, seq) => requestSeq[key] === seq
 
 	const trendRef = ref(null)
 	let trendChart = null
@@ -211,7 +320,20 @@
 		return minute + ' 分 ' + (total % 60) + ' 秒'
 	}
 
-	const cards = computed(() => {
+	/** { CNY: 1200, USD: 99 } → "¥1,200.00 / $99.00"；没有带币种的单独标出来 */
+	function formatAmounts(amounts) {
+		const entries = Object.entries(amounts || {}).filter(([, amount]) => Number(amount) > 0)
+		if (!entries.length) return '0'
+		return entries
+			.map(([currency, amount]) => {
+				const text = Number(amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+				if (!currency) return text + '（未知币种）'
+				return (CURRENCY_SYMBOL[currency] || currency + ' ') + text
+			})
+			.join(' / ')
+	}
+
+	const trafficCards = computed(() => {
 		const cur = state.overview.current || {}
 		const growth = state.overview.growth || {}
 		return [
@@ -222,6 +344,48 @@
 			// 跳出率涨是坏事，颜色要反过来
 			{ key: 'bounce_rate', label: '跳出率', value: (cur.bounce_rate || 0) + '%', growth: growth.bounce_rate, invert: true },
 			{ key: 'avg_duration', label: '平均停留', value: formatDuration(cur.avg_duration), growth: growth.avg_duration },
+		]
+	})
+
+	const conversionCards = computed(() => {
+		const cur = state.overview.current || {}
+		const growth = state.overview.growth || {}
+		const amounts = state.overview.amounts || { order: {}, pay: {} }
+		const orderAmount = formatAmounts(amounts.order)
+		const payAmount = formatAmounts(amounts.pay)
+		return [
+			{ key: 'sign_ups', label: '注册', value: formatNumber(cur.sign_ups), growth: growth.sign_ups },
+			{
+				key: 'sign_in_users',
+				label: '登录用户',
+				value: formatNumber(cur.sign_in_users),
+				growth: growth.sign_in_users,
+				tip: '按用户ID去重。同一个人登录多次只算一个',
+			},
+			{ key: 'orders', label: '提交订单', value: formatNumber(cur.orders), growth: growth.orders },
+			{
+				key: 'order_amount',
+				label: '下单金额',
+				value: orderAmount,
+				small: orderAmount.length > 12,
+				noGrowth: true,
+				tip: '按币种分开汇总，.com 站是美元、.cn 站是人民币，不做换算',
+			},
+			{
+				key: 'payments',
+				label: '支付成功',
+				value: formatNumber(cur.payments),
+				growth: growth.payments,
+				tip: '只统计在支付页先看到待支付、之后付款成功的订单；换设备付款的统计不到，以财务数据为准',
+			},
+			{
+				key: 'pay_amount',
+				label: '支付金额',
+				value: payAmount,
+				small: payAmount.length > 12,
+				noGrowth: true,
+				sub: '埋点口径，非财务数据',
+			},
 		]
 	})
 
@@ -244,7 +408,7 @@
 	}
 
 	const rankingColumns = computed(() => {
-		const isEvent = state.dimension === 'event'
+		const isEvent = state.rankingDimension === 'event'
 		return [
 			{ title: '名称', dataIndex: 'name', ellipsis: true },
 			isEvent
@@ -257,7 +421,7 @@
 
 	const eventColumns = [
 		{ title: '时间', dataIndex: 'create_time', width: 160, fixed: 'left' },
-		{ title: '事件', dataIndex: 'event_name', width: 170 },
+		{ title: '事件', dataIndex: 'event_name', width: 190 },
 		{ title: '页面', dataIndex: 'pathname', width: 200, ellipsis: true },
 		{ title: '数值', dataIndex: 'value', width: 90 },
 		{ title: '扩展属性', dataIndex: 'props', width: 200, ellipsis: true },
@@ -315,13 +479,15 @@
 	}
 
 	async function loadOverview() {
+		const seq = nextSeq('overview')
 		const res = await statOverviewApi(rangeParams())
-		if (res && res.code === 0) state.overview = res.data
+		if (isLatest('overview', seq) && res && res.code === 0) state.overview = res.data
 	}
 
 	async function loadTrend() {
+		const seq = nextSeq('trend')
 		const res = await statTrendApi(rangeParams())
-		if (res && res.code === 0) {
+		if (isLatest('trend', seq) && res && res.code === 0) {
 			state.trend = res.data
 			await nextTick()
 			renderTrend()
@@ -329,30 +495,40 @@
 	}
 
 	async function loadFunnel() {
+		const seq = nextSeq('funnel')
 		const res = await statFunnelApi(rangeParams())
-		if (res && res.code === 0) state.funnel = res.data.list || []
+		if (isLatest('funnel', seq) && res && res.code === 0) state.funnel = res.data.list || []
 	}
 
 	async function loadRanking() {
+		const seq = nextSeq('ranking')
+		const dimension = state.dimension
 		state.rankingLoading = true
 		try {
-			const res = await statRankingApi({ ...rangeParams(), dimension: state.dimension, limit: 20 })
-			if (res && res.code === 0) state.ranking = res.data.list || []
+			const res = await statRankingApi({ ...rangeParams(), dimension, limit: 20 })
+			if (!isLatest('ranking', seq)) return
+			if (res && res.code === 0) {
+				state.ranking = res.data.list || []
+				state.rankingDimension = dimension
+			}
 		} finally {
-			state.rankingLoading = false
+			// 只有最后一次请求结束才关 loading，否则前一个请求回来会把后一个的 loading 提前关掉
+			if (isLatest('ranking', seq)) state.rankingLoading = false
 		}
 	}
 
 	async function loadEvents() {
+		const seq = nextSeq('events')
 		state.eventsLoading = true
 		try {
 			const res = await statEventsApi({ ...rangeParams(), ...state.eventFilter })
+			if (!isLatest('events', seq)) return
 			if (res && res.code === 0) {
 				state.events = res.data.list || []
 				state.eventTotal = res.data.total || 0
 			}
 		} finally {
-			state.eventsLoading = false
+			if (isLatest('events', seq)) state.eventsLoading = false
 		}
 	}
 
@@ -374,12 +550,13 @@
 	}
 
 	async function loadAll() {
+		const seq = nextSeq('all')
 		state.loading = true
 		try {
 			state.eventFilter.page = 1
 			await Promise.all([loadOverview(), loadTrend(), loadFunnel(), loadRanking(), loadEvents()])
 		} finally {
-			state.loading = false
+			if (isLatest('all', seq)) state.loading = false
 		}
 	}
 
@@ -420,11 +597,27 @@
 			font-size: 26px;
 			font-weight: 600;
 			line-height: 1.2;
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+
+		// 多币种金额比较长，缩小字号避免在卡片里被截断
+		&-value-sm {
+			font-size: 17px;
+			line-height: 31px;
 		}
 
 		&-growth {
 			font-size: 12px;
 		}
+	}
+
+	.tip-icon {
+		margin-left: 4px;
+		color: rgba(0, 0, 0, 0.35);
+		font-size: 13px;
+		cursor: help;
 	}
 
 	.up {
@@ -467,6 +660,13 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		vertical-align: bottom;
+	}
+
+	.code {
+		margin-left: 6px;
+		color: rgba(0, 0, 0, 0.35);
+		font-family: 'DM Mono', Consolas, Monaco, monospace;
+		font-size: 12px;
 	}
 
 	.mono {
